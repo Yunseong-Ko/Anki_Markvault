@@ -1,0 +1,30 @@
+{
+ "output_dir": "",
+ "query": "flag:1 OR tag:marked",
+ "split_by": "none",
+ "single_file_name": "복습 카드",
+ "flag_names": {
+  "1": "빨강",
+  "2": "주황",
+  "3": "초록",
+  "4": "파랑",
+  "5": "분홍",
+  "6": "청록",
+  "7": "보라",
+  "marked": "Mark",
+  "0": "자동 포함"
+ },
+ "cloze_mode": "highlight",
+ "image_link_style": "markdown",
+ "triggers": {
+  "on_change": false,
+  "on_sync": true,
+  "on_profile_open": true
+ },
+ "auto_include_lapses": 0,
+ "debounce_sec": 3,
+ "archive_removed": false,
+ "weekly_snapshot": false,
+ "show_meta": true,
+ "show_tooltip": true
+}

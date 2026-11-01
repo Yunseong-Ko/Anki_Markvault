@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+out/
+out_state/
+testcol/
+dist/
+markvault/user_files/state.json
