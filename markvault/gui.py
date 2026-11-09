@@ -140,7 +140,7 @@ class ExportDialog(QDialog):
         form.addRow("모양", self.mode)
 
         self.fmt = QComboBox()
-        self.fmt.addItems(["PDF", "docx (pandoc 필요)"])
+        self.fmt.addItems(["PDF — 쭉 읽기용", "Word (docx) — 노트정리용, 편집 가능"])
         form.addRow("형식", self.fmt)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -192,12 +192,15 @@ class ExportDialog(QDialog):
                         f"<script src='{base}_anki/js/vendor/mathjax/tex-chtml.js'></script>")
                 html = exporter.build_html(cards, cfg, r, mode, memos, media_dir=col.media.dir(), extra_head=head)
                 return ("pdf", html, col.media.dir(), len(cards))
-            # docx: 범위에 맞는 Markdown 을 임시로 만들어 pandoc
-            tmp_md = path + ".tmp.md"
-            with open(tmp_md, "w", encoding="utf-8") as f:
-                f.write(w._compose(cards, memos, os.path.splitext(os.path.basename(path))[0]))
-            err = exporter.md_to_docx(tmp_md, path, cfg["output_dir"])
-            os.remove(tmp_md)
+            # docx: 외부 프로그램 없이 직접 만든다
+            from .core.docx_writer import build_docx
+            err = None
+            if cards:
+                try:
+                    build_docx(cards, cfg, r, path, col.media.dir(), memos,
+                               title=os.path.splitext(os.path.basename(path))[0])
+                except Exception as e:  # noqa: BLE001
+                    err = f"docx 만들기 실패: {e}"
             return ("docx", err, None, len(cards))
 
         def done(result):
