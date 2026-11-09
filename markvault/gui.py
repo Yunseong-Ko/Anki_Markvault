@@ -218,7 +218,12 @@ class ExportDialog(QDialog):
         QueryOp(parent=self, op=op, success=done).run_in_background()
 
     def _print_pdf(self, html: str, media_dir: str, path: str, n: int):
-        """Anki 에 내장된 브라우저 엔진으로 '인쇄'. 이미지는 collection.media 에서 바로 읽는다."""
+        """Anki 에 내장된 브라우저 엔진으로 '인쇄'.
+        setHtml() 은 2MB 가 넘으면 조용히 빈 페이지가 되므로, 임시 HTML 파일을 만들어 load() 한다."""
+        self._html_path = os.path.splitext(path)[0] + ".html"
+        with open(self._html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        self.status.setText(f"PDF 만드는 중… ({n}장, 카드가 많으면 1분 정도 걸려요)")
         self._view = QWebEngineView()
         self._view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         self._view.resize(800, 1100)
@@ -229,17 +234,27 @@ class ExportDialog(QDialog):
         def finished(p, ok):
             self._view.deleteLater()
             self._view = None
-            if ok:
+            size = os.path.getsize(p) if ok and os.path.exists(p) else 0
+            if ok and size > 2000:
+                try:
+                    os.remove(self._html_path)
+                except OSError:
+                    pass
                 tooltip(f"PDF 저장: {n}장")
                 self.accept()
             else:
-                self.status.setText("PDF 저장에 실패했어요.")
+                self.status.setText("PDF 가 비어 있어요. 같은 이름의 .html 파일을 브라우저로 열어 인쇄(⌘P)해 주세요.")
 
         def loaded(ok):
-            # 이미지가 다 그려질 시간을 조금 준다
-            # 이미지·수식이 다 그려질 시간을 준다
-            QTimer.singleShot(1500, lambda: self._view.page().printToPdf(path, layout))
+            if not ok:
+                self._view.deleteLater()
+                self._view = None
+                self.status.setText("페이지를 못 열었어요. 같은 이름의 .html 파일을 브라우저로 열어 인쇄(⌘P)해 주세요.")
+                return
+            # 이미지·수식이 다 그려질 시간을 준다 (카드 수에 비례, 최대 10초)
+            delay = min(10000, 1500 + n * 20)
+            QTimer.singleShot(delay, lambda: self._view.page().printToPdf(path, layout))
 
         self._view.page().pdfPrintingFinished.connect(finished)
         self._view.loadFinished.connect(loaded)
-        self._view.setHtml(html, QUrl.fromLocalFile(media_dir.rstrip("/\\") + os.sep))
+        self._view.load(QUrl.fromLocalFile(self._html_path))
