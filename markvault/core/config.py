@@ -7,8 +7,8 @@ DEFAULTS = {
     "output_dir": "",
     # Anki 검색식
     "query": "flag:1 OR tag:marked",
-    # 이 덱(하위 덱 포함)만. 비우면 전체. 예: "AnKing Step Deck::Bootcamp"
-    "deck_filter": "",
+    # 이 덱들(하위 덱 포함)만. 비우면 전체. 예: ["AnKing Step Deck::Bootcamp"]
+    "deck_filter": [],
     # none | flag | deck  — 파일을 어떻게 나눌지
     "split_by": "none",
     "single_file_name": "복습 카드",
@@ -41,18 +41,44 @@ DEFAULTS = {
 FLAG_EMOJI = {1: "🔴", 2: "🟠", 3: "🟢", 4: "🔵", 5: "🩷", 6: "🩵", 7: "🟣", "marked": "⭐", 0: "⚠", "0": "⚠"}
 
 
-def effective_query(cfg) -> str:
-    """검색식 + (옵션) 실패 N회 이상 자동 포함."""
+def deck_list(cfg) -> list:
+    """deck_filter 는 예전엔 문자열 하나, 지금은 목록."""
+    d = cfg.get("deck_filter") or []
+    if isinstance(d, str):
+        d = [d] if d.strip() else []
+    return [x for x in d if x and x.strip()]
+
+
+def _esc_deck(name: str) -> str:
+    # 따옴표·밑줄·별표가 덱 이름에 있어도 글자 그대로 찾도록 이스케이프
+    return name.replace("\\", "\\\\").replace('"', '\\"').replace("_", "\\_").replace("*", "\\*")
+
+
+def scope_query(cfg, decks=None, rated_days: int = 0, min_lapses: int = 0) -> str:
+    """검색식 + (옵션) 실패 N회 자동 포함 + 덱들 + 최근 N일 복습 + 실패 N회 이상."""
     q = cfg["query"]
     n = int(cfg.get("auto_include_lapses") or 0)
     if n > 0:
         q = f"({q}) OR prop:lapses>={n}"
-    deck = (cfg.get("deck_filter") or "").strip()
-    if deck:
-        # 따옴표·밑줄·별표가 덱 이름에 있어도 글자 그대로 찾도록 이스케이프
-        esc = deck.replace("\\", "\\\\").replace('"', '\\"').replace("_", "\\_").replace("*", "\\*")
-        q = f'({q}) "deck:{esc}"'
+    q = f"({q})"
+    decks = deck_list(cfg) if decks is None else [d for d in decks if d]
+    if decks:
+        q += " (" + " OR ".join(f'"deck:{_esc_deck(d)}"' for d in decks) + ")"
+    if rated_days and rated_days > 0:
+        q += f" rated:{min(int(rated_days), 365)}"
+    if min_lapses and min_lapses > 0:
+        q += f" prop:lapses>={int(min_lapses)}"
     return q
+
+
+def effective_query(cfg) -> str:
+    return scope_query(cfg)
+
+
+def prefix_base(cfg) -> str:
+    """제목에서 뺄 앞부분 기준: 고른 덱이 하나면 그 덱."""
+    d = deck_list(cfg)
+    return d[0] if len(d) == 1 else ""
 
 
 def merged(user_cfg):

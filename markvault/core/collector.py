@@ -125,3 +125,24 @@ def merge_siblings(cards: List[CardInfo]) -> List[CardInfo]:
     for g in out:
         g.cid = min(g.cids)
     return out
+
+
+def deck_counts(col, query: str) -> "dict[str, int]":
+    """검색식에 맞는 카드 수를 덱별로 (상위 덱에도 더해서). 덱 트리 옆 숫자용."""
+    ids = col.find_cards(query)
+    per_did: "dict[int, int]" = {}
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]
+        ph = ",".join("?" * len(chunk))
+        for did, n in col.db.all(
+                f"select case when odid != 0 then odid else did end as d, count() from cards "
+                f"where id in ({ph}) group by d", *chunk):
+            per_did[did] = per_did.get(did, 0) + n
+    out: "dict[str, int]" = {}
+    for did, n in per_did.items():
+        name = col.decks.name(did)
+        parts = name.split("::")
+        for k in range(1, len(parts) + 1):
+            key = "::".join(parts[:k])
+            out[key] = out.get(key, 0) + n
+    return out

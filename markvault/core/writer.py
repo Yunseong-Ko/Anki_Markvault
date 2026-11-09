@@ -128,7 +128,7 @@ class Writer:
         n_cards = sum(len(c.cids or [c.cid]) for c in cards)
         parts = [HEADER_NOTE, f"# {title}", f"*카드 {n_cards}장 · 노트 {len(cards)}개 · 갱신 {now} · 검색식 `{C.effective_query(self.cfg)}`*", ""]
         from .decknames import common_prefix, rel_parts
-        prefix = common_prefix((c.deck for c in cards), self.cfg.get("deck_filter", ""))
+        prefix = common_prefix((c.deck for c in cards), C.prefix_base(self.cfg))
         by_deck: "OrderedDict[str, List[CardInfo]]" = OrderedDict()
         for c in cards:
             by_deck.setdefault(c.deck, []).append(c)
@@ -263,7 +263,7 @@ class Writer:
         for c in cards:
             by_deck.setdefault(c.deck, []).append(c)
         from .decknames import common_prefix
-        pre = common_prefix(by_deck.keys(), self.cfg.get("deck_filter", ""))
+        pre = common_prefix(by_deck.keys(), C.prefix_base(self.cfg))
         if pre:
             lines.insert(3, f"*{' › '.join(pre)}*")
         printed: List[str] = []

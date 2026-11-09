@@ -129,7 +129,7 @@ def build_html(cards: List[CardInfo], cfg: dict, r: Renderer, mode: str = "read"
     base = ("file://" + media_dir.replace("\\", "/").rstrip("/") + "/") if media_dir else ""
     if base and not base.startswith("file:///"):
         base = base.replace("file://", "file:///", 1)
-    prefix = common_prefix((c.deck for c in cards), cfg.get("deck_filter", ""))
+    prefix = common_prefix((c.deck for c in cards), C.prefix_base(cfg))
 
     out = [f"<!doctype html><html><head><meta charset='utf-8'><style>{CSS}</style>", extra_head, "</head><body>"]
     out.append(f"<h1>{htmllib.escape(title)}</h1>")

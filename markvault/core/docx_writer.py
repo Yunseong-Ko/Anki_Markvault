@@ -15,6 +15,7 @@ from xml.sax.saxutils import escape
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+from . import config as C
 from .collector import CardInfo
 
 
@@ -217,7 +218,7 @@ def build_docx(cards: List[CardInfo], cfg: dict, r: Renderer, path: str, media_d
 
     from .decknames import common_prefix, heading_levels
     from .exporter import pull_images
-    prefix = common_prefix((c.deck for c in cards), cfg.get("deck_filter", ""))
+    prefix = common_prefix((c.deck for c in cards), C.prefix_base(cfg))
     printed: List[str] = []
     for c in cards:
         levels = heading_levels(c.deck, prefix)

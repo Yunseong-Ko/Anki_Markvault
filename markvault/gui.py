@@ -7,16 +7,87 @@ from datetime import datetime
 from aqt import mw
 from aqt.operations import QueryOp
 from aqt.qt import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
-                    QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox, QUrl, QVBoxLayout,
-                    QWebEngineView, QTimer, QPageLayout, QPageSize, QMarginsF, QWidget, Qt)
+                    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
+                    QTreeWidget, QTreeWidgetItem, QUrl, QVBoxLayout, QWebEngineView, QTimer, QPageLayout,
+                    QPageSize, QMarginsF, QWidget, Qt, pyqtSignal)
 from aqt.utils import showInfo, tooltip
 
 from .core import config as C
 from .core import content as CT
 from .core import exporter
-from .core.collector import collect
+from .core.collector import collect, deck_counts
 from .core.renderer import Renderer
 from .core.writer import Writer, extract_memo, parse_blocks
+
+
+class DeckTree(QTreeWidget):
+    """플래그·마크 카드가 있는 덱만 트리로, 체크박스 + 장수. 여러 덱 선택 가능.
+    selected(): 체크된 덱 목록(위에서 다 체크된 덱은 그 덱 하나로). 전부 체크면 [] = 전체."""
+    changed = pyqtSignal()
+
+    def __init__(self, counts: dict, checked: list, parent=None):
+        super().__init__(parent)
+        self.setHeaderLabels(["덱", "표시 카드"])
+        self.setColumnCount(2)
+        self.setUniformRowHeights(True)
+        self.header().setStretchLastSection(False)
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._items = {}
+        self._building = True
+        all_on = not checked
+        for name in sorted(counts):
+            parts = name.split("::")
+            parent_item = self._items.get("::".join(parts[:-1])) if len(parts) > 1 else None
+            it = QTreeWidgetItem([parts[-1], f"{counts[name]}장"])
+            it.setData(0, Qt.ItemDataRole.UserRole, name)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            it.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            on = all_on or any(name == c or name.startswith(c + "::") for c in checked)
+            it.setCheckState(0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            (parent_item.addChild(it) if parent_item else self.addTopLevelItem(it))
+            self._items[name] = it
+        # 처음엔 2단계까지 펼침 + 체크된 덱이 보이게
+        for name, it in self._items.items():
+            depth = name.count("::")
+            if depth < 2 or any(c.startswith(name + "::") for c in checked) \
+                    or it.checkState(0) == Qt.CheckState.PartiallyChecked:
+                it.setExpanded(True)
+        self._building = False
+        self.itemChanged.connect(lambda *_: (not self._building) and self.changed.emit())
+
+    def selected(self):
+        out = []
+
+        def walk(it):
+            st = it.checkState(0)
+            if st == Qt.CheckState.Checked:
+                out.append(it.data(0, Qt.ItemDataRole.UserRole))
+            elif st == Qt.CheckState.PartiallyChecked:
+                for i in range(it.childCount()):
+                    walk(it.child(i))
+        tops = [self.topLevelItem(i) for i in range(self.topLevelItemCount())]
+        for t in tops:
+            walk(t)
+        if tops and all(t.checkState(0) == Qt.CheckState.Checked for t in tops):
+            return []          # 전부 = 전체
+        return out
+
+    def nothing(self) -> bool:
+        return all(self.topLevelItem(i).checkState(0) == Qt.CheckState.Unchecked
+                   for i in range(self.topLevelItemCount()))
+
+    def set_all(self, on: bool):
+        st = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+        for i in range(self.topLevelItemCount()):
+            self.topLevelItem(i).setCheckState(0, st)
+
+
+def _deck_counts(cfg) -> dict:
+    try:
+        return deck_counts(mw.col, C.scope_query(cfg, decks=[]))
+    except Exception:
+        return {}
 
 
 class SettingsDialog(QDialog):
@@ -36,22 +107,14 @@ class SettingsDialog(QDialog):
         row.addWidget(btn)
         form.addRow("출력 폴더", row)
 
-        self.deck_filter = QComboBox()
-        self.deck_filter.addItem("(전체 덱)")
-        try:
-            names = sorted(d.name for d in mw.col.decks.all_names_and_ids())
-        except Exception:
-            names = []
-        self.deck_filter.addItems(names)
-        cur = cfg.get("deck_filter") or ""
-        if cur and cur in names:
-            self.deck_filter.setCurrentText(cur)
-        form.addRow("이 덱만 (하위 덱 포함)", self.deck_filter)
+        self.decks = DeckTree(_deck_counts(cfg), C.deck_list(cfg))
+        self.decks.setMinimumHeight(180)
+        form.addRow("모을 덱\n(동기화 때 자동)", self.decks)
 
         self.query = QLineEdit(cfg["query"])
         form.addRow("검색식", self.query)
-        form.addRow("", QLabel("<small>예: <code>flag:1 OR tag:marked</code> · 덱 한정: "
-                               "<code>(flag:1 OR tag:marked) deck:국시*</code></small>"))
+        form.addRow("", QLabel("<small>예: <code>flag:1 OR tag:marked</code> (빨간 플래그 또는 Mark). "
+                               "덱은 위 트리에서 고르세요.</small>"))
 
         self.lapses = QSpinBox()
         self.lapses.setRange(0, 50)
@@ -120,7 +183,7 @@ class SettingsDialog(QDialog):
         cfg = dict(self.user_cfg)
         cfg["output_dir"] = self.out_dir.text().strip()
         cfg["query"] = self.query.text().strip() or C.DEFAULTS["query"]
-        cfg["deck_filter"] = "" if self.deck_filter.currentIndex() == 0 else self.deck_filter.currentText()
+        cfg["deck_filter"] = self.decks.selected()
         cfg["auto_include_lapses"] = self.lapses.value()
         cfg["extra_fields"] = [x.strip() for x in self.extra.text().split(",") if x.strip()]
         cfg["split_by"] = ["none", "flag", "deck"][self.split.currentIndex()]
@@ -162,20 +225,41 @@ class ExportDialog(QDialog):
         self.setStyleSheet(PREVIEW_CSS)
 
         form = QFormLayout()
-        self.scope = QComboBox()
-        self.scope.addItems(["전체", "특정 덱", "이번 주 새로 표시한 카드", "실패 N회 이상"])
-        form.addRow("범위", self.scope)
-        self.deck = QComboBox()
-        try:
-            decks = sorted(d.name for d in mw.col.decks.all_names_and_ids())
-        except Exception:
-            decks = []
-        self.deck.addItems(decks)
-        form.addRow("덱", self.deck)
+        self.decks = DeckTree(_deck_counts(self.cfg), C.deck_list(self.cfg))
+        self.decks.setMinimumHeight(200)
+        row = QHBoxLayout()
+        b_all, b_none = QPushButton("전체 선택"), QPushButton("전체 해제")
+        b_all.clicked.connect(lambda: self.decks.set_all(True))
+        b_none.clicked.connect(lambda: self.decks.set_all(False))
+        row.addWidget(b_all)
+        row.addWidget(b_none)
+        row.addStretch(1)
+        deck_box = QVBoxLayout()
+        deck_box.addWidget(self.decks)
+        deck_box.addLayout(row)
+        form.addRow("덱", deck_box)
+
+        self.use_rated = QCheckBox("최근")
+        self.rated = QSpinBox()
+        self.rated.setRange(1, 365)
+        self.rated.setValue(7)
+        self.rated.setSuffix("일 안에 복습한 카드만")
+        self.use_lapses = QCheckBox("실패")
         self.min_lapses = QSpinBox()
         self.min_lapses.setRange(1, 50)
         self.min_lapses.setValue(3)
-        form.addRow("실패 N회", self.min_lapses)
+        self.min_lapses.setSuffix("회 이상인 카드만")
+        cond = QVBoxLayout()
+        for a, b in ((self.use_rated, self.rated), (self.use_lapses, self.min_lapses)):
+            r = QHBoxLayout()
+            r.addWidget(a)
+            r.addWidget(b)
+            r.addStretch(1)
+            cond.addLayout(r)
+        form.addRow("조건", cond)
+        self.count = QLabel("")
+        form.addRow("", self.count)
+
         self.mode = QComboBox()
         self.mode.addItems(["읽기용 — 정답 바로 보임", "확인용 — 빈칸·문제만, 정답은 마지막 장"])
         form.addRow("모양", self.mode)
@@ -230,8 +314,10 @@ class ExportDialog(QDialog):
         lay.addWidget(self.progress_box)
         lay.addWidget(self.status)
         lay.addWidget(self.buttons)
-        self.scope.currentIndexChanged.connect(self._toggle)
-        self._toggle()
+        for w in (self.decks.changed, self.use_rated.toggled, self.rated.valueChanged,
+                  self.use_lapses.toggled, self.min_lapses.valueChanged):
+            w.connect(self._recount)
+        self._recount()
 
         self._tick = QTimer(self)
         self._tick.timeout.connect(self._update_elapsed)
@@ -243,10 +329,31 @@ class ExportDialog(QDialog):
     def _query_op(self, op, success, failure):
         QueryOp(parent=self, op=op, success=success).failure(failure).run_in_background()
 
-    def _toggle(self):
-        i = self.scope.currentIndex()
-        self.deck.setEnabled(i == 1)
-        self.min_lapses.setEnabled(i == 3)
+    def _scope(self):
+        """(검색식, 고른 덱 목록)"""
+        decks = self.decks.selected()
+        q = C.scope_query(self.cfg, decks,
+                          self.rated.value() if self.use_rated.isChecked() else 0,
+                          self.min_lapses.value() if self.use_lapses.isChecked() else 0)
+        return q, decks
+
+    def _recount(self, *_):
+        self.rated.setEnabled(self.use_rated.isChecked())
+        self.min_lapses.setEnabled(self.use_lapses.isChecked())
+        save = self.buttons.button(QDialogButtonBox.StandardButton.Save)
+        if self.decks.nothing():
+            self.count.setText("덱을 하나 이상 골라 주세요.")
+            save.setEnabled(False)
+            return
+        q, _ = self._scope()
+        try:
+            n = len(mw.col.find_cards(q))
+        except Exception as e:  # noqa: BLE001
+            self.count.setText(f"검색식 오류: {e}")
+            save.setEnabled(False)
+            return
+        self.count.setText(f"<b>선택 범위: 카드 {n}장</b>")
+        save.setEnabled(n > 0)
 
     def _cancel(self):
         self._stop_ui()
@@ -309,13 +416,13 @@ class ExportDialog(QDialog):
     def _fail(self, msg: str):
         self._stop_ui()
         self.form_box.setEnabled(True)
-        self.buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(True)
+        self._recount()
         self.progress_box.hide()
         self.status.setText(msg)
 
     # ---- 내보내기 ----
     def _export(self, path: str = ""):
-        scope = ["all", "deck", "week", "lapses"][self.scope.currentIndex()]
+        query, decks = self._scope()
         mode = ["read", "check"][self.mode.currentIndex()]
         is_pdf = self.fmt.currentIndex() == 0
         if not path:
@@ -326,18 +433,17 @@ class ExportDialog(QDialog):
                 return
         self._start_ui()
         self._set_stage("카드 모으는 중…", 0, 1)
-        cfg, state_dir = self.cfg, self.state_dir
-        deck, min_l = self.deck.currentText(), self.min_lapses.value()
+        cfg = dict(self.cfg, deck_filter=decks)   # 제목 정리(공통 앞부분)도 고른 덱 기준
+        state_dir = self.state_dir
 
         def progress(i, n):
             self._on_main(lambda: self._set_stage(f"카드 모으는 중… {i}/{n}", i, n))
 
         # 1단계: 카드 모으기 (빨리 끝남) → 미리보기 시작
         def op_collect(col):
-            cards = collect(col, C.effective_query(cfg), cfg.get("extra_fields"), progress=progress)
+            cards = collect(col, query, cfg.get("extra_fields"), progress=progress)
             r = Renderer(cfg, col.media.dir(), cfg["output_dir"])
             w = Writer(cfg, r, state_dir=state_dir)
-            cards = exporter.filter_cards(cards, scope, deck, min_l, w.state.get("cards"))
             memos = {}
             for fn in w.state.get("files", []):
                 p = os.path.join(cfg["output_dir"], fn)
