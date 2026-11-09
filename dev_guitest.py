@@ -21,7 +21,7 @@ def runner(op, success, failure):
         success(res)
     QTimer.singleShot(50, go)
 gui.mw = types.SimpleNamespace(col=col)
-dlg = gui.ExportDialog(None, {"output_dir": os.path.abspath("outbig")}, os.path.abspath("outbig_state"),
+dlg = gui.ExportDialog(None, {"output_dir": os.path.abspath("outbig"), "deck_filter": "AnKing Step Deck::Bootcamp"}, os.path.abspath("outbig_state"),
                        runner=runner, on_main=lambda fn: fn(), server_url=lambda: "http://127.0.0.1:9/")
 dlg.fmt.setCurrentIndex(fmt); dlg.resize(560, 420); dlg.show()
 t0 = time.time()

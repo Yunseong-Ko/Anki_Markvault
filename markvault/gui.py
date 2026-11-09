@@ -36,6 +36,18 @@ class SettingsDialog(QDialog):
         row.addWidget(btn)
         form.addRow("출력 폴더", row)
 
+        self.deck_filter = QComboBox()
+        self.deck_filter.addItem("(전체 덱)")
+        try:
+            names = sorted(d.name for d in mw.col.decks.all_names_and_ids())
+        except Exception:
+            names = []
+        self.deck_filter.addItems(names)
+        cur = cfg.get("deck_filter") or ""
+        if cur and cur in names:
+            self.deck_filter.setCurrentText(cur)
+        form.addRow("이 덱만 (하위 덱 포함)", self.deck_filter)
+
         self.query = QLineEdit(cfg["query"])
         form.addRow("검색식", self.query)
         form.addRow("", QLabel("<small>예: <code>flag:1 OR tag:marked</code> · 덱 한정: "
@@ -108,6 +120,7 @@ class SettingsDialog(QDialog):
         cfg = dict(self.user_cfg)
         cfg["output_dir"] = self.out_dir.text().strip()
         cfg["query"] = self.query.text().strip() or C.DEFAULTS["query"]
+        cfg["deck_filter"] = "" if self.deck_filter.currentIndex() == 0 else self.deck_filter.currentText()
         cfg["auto_include_lapses"] = self.lapses.value()
         cfg["extra_fields"] = [x.strip() for x in self.extra.text().split(",") if x.strip()]
         cfg["split_by"] = ["none", "flag", "deck"][self.split.currentIndex()]

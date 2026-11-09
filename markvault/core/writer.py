@@ -9,6 +9,7 @@ from typing import Dict, List
 
 from . import config as C
 from .collector import CardInfo
+from .decknames import pretty
 from .renderer import Renderer
 
 _RE_CID = re.compile(r"^%% cid:(\d+)(?: nid:(\d+))? %%\s*$", re.M)
@@ -124,12 +125,15 @@ class Writer:
     # ---- 파일 내용 ---------------------------------------------------
     def _compose(self, cards: List[CardInfo], memos: Dict[int, str], title: str) -> str:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        parts = [HEADER_NOTE, f"# {title}", f"*{len(cards)}장 · 갱신 {now} · 검색식 `{C.effective_query(self.cfg)}`*", ""]
+        n_cards = sum(len(c.cids or [c.cid]) for c in cards)
+        parts = [HEADER_NOTE, f"# {title}", f"*카드 {n_cards}장 · 노트 {len(cards)}개 · 갱신 {now} · 검색식 `{C.effective_query(self.cfg)}`*", ""]
+        from .decknames import common_prefix, rel_parts
+        prefix = common_prefix((c.deck for c in cards), self.cfg.get("deck_filter", ""))
         by_deck: "OrderedDict[str, List[CardInfo]]" = OrderedDict()
         for c in cards:
             by_deck.setdefault(c.deck, []).append(c)
         for deck, cs in by_deck.items():
-            parts.append("## " + deck.replace("::", " › "))
+            parts.append("## " + " › ".join(rel_parts(deck, prefix)))
             parts.append("")
             for c in cs:
                 block = self.r.render_block(c)
@@ -258,14 +262,18 @@ class Writer:
         by_deck: "OrderedDict[str, List[CardInfo]]" = OrderedDict()
         for c in cards:
             by_deck.setdefault(c.deck, []).append(c)
+        from .decknames import common_prefix
+        pre = common_prefix(by_deck.keys(), self.cfg.get("deck_filter", ""))
+        if pre:
+            lines.insert(3, f"*{' › '.join(pre)}*")
         printed: List[str] = []
         for deck, cs in by_deck.items():
-            parts = deck.split("::")
+            parts = deck.split("::")[len(pre):] or deck.split("::")[-1:]
             for depth in range(len(parts)):
                 prefix = parts[: depth + 1]
                 if prefix != printed[: depth + 1]:
-                    n = sum(len(v) for d, v in by_deck.items() if d.split("::")[: depth + 1] == prefix)
-                    lines.append("    " * depth + f"- **{parts[depth]}** ({n}장)")
+                    n = sum(len(v) for d, v in by_deck.items() if d.split("::")[len(pre):][: depth + 1] == prefix)
+                    lines.append("    " * depth + f"- **{pretty(parts[depth])}** ({n}장)")
             printed = parts
             for c in cs:
                 t = self.r.title_for(c)

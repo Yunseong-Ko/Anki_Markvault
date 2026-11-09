@@ -20,6 +20,7 @@ from .collector import CardInfo
 
 def _find_memo(memos, c):
     return memos.get(-c.nid) or memos.get(c.cid) or next((memos[x] for x in (c.cids or []) if x in memos), "")
+from . import content as CT
 from .exporter import card_parts
 from .renderer import _HR, _RE_IO, _RE_SOUND, Renderer
 
@@ -100,7 +101,7 @@ class _Doc:
         ppr += extra_ppr
         self.body.append(f"<w:p>{f'<w:pPr>{ppr}</w:pPr>' if ppr else ''}{runs}</w:p>")
 
-    def image(self, name: str) -> str:
+    def image(self, name: str, max_w_cm: float = MAX_IMG_CM, max_h_cm: float = 12.0) -> str:
         src = os.path.join(self.media_dir, htmllib.unescape(name))
         if not os.path.exists(src):
             return self.run(f"[이미지 없음: {name}]", i=True, color="999999")
@@ -112,10 +113,10 @@ class _Doc:
             self.rels.append((f"rIdImg{len(self.images)}", self.images[name]))
         rid = next(r for r, t in self.rels if t == self.images[name])
         w, h = _img_size(src) or (800, 600)
-        cm_w = min(MAX_IMG_CM, w / 96 * 2.54)
+        cm_w = min(max_w_cm, w / 96 * 2.54)
         cm_h = cm_w * h / max(w, 1)
-        if cm_h > 12:                      # 너무 긴 그림은 높이로 제한
-            cm_w, cm_h = cm_w * 12 / cm_h, 12
+        if cm_h > max_h_cm:                # 너무 긴 그림은 높이로 제한 (비율 유지)
+            cm_w, cm_h = cm_w * max_h_cm / cm_h, max_h_cm
         cx, cy = int(cm_w * EMU_PER_CM), int(cm_h * EMU_PER_CM)
         self._pic_id += 1
         pid = self._pic_id
@@ -214,25 +215,44 @@ def build_docx(cards: List[CardInfo], cfg: dict, r: Renderer, path: str, media_d
     d.para(d.run(title), style="Title")
     d.para(d.run(f"카드 {sum(len(c.cids or [c.cid]) for c in cards)}장 · 노트 {len(cards)}개 · {datetime.now().strftime('%Y-%m-%d %H:%M')}", color="888888", size=18))
 
+    from .decknames import common_prefix, heading_levels
+    from .exporter import pull_images
+    prefix = common_prefix((c.deck for c in cards), cfg.get("deck_filter", ""))
     printed: List[str] = []
     for c in cards:
-        parts = c.deck.split("::")
-        # 덱 경로: 바뀐 단계부터 제목 1~3 (3단계 넘으면 마지막 단계에 합쳐 붙임)
-        levels = parts[:2] + ([" › ".join(parts[2:])] if len(parts) > 2 else [])
+        levels = heading_levels(c.deck, prefix)
         for depth, name in enumerate(levels):
             if levels[: depth + 1] != printed[: depth + 1]:
                 d.para(d.run(name), style=f"Heading{depth + 1}")
         printed = levels
 
-        d.para(d.run(r.title_for(c)), style="Heading4")
+        # 카드 제목 줄은 본문 첫 줄과 같아서 넣지 않는다. 카드 사이는 위쪽 선으로 구분.
+        d.para("", style="CardSep")
         q_html, a_html, extras = card_parts(c, "read")
+        imgs = []
+        q_html, i = pull_images(q_html)
+        imgs += i
         if a_html is None:
             d.html(q_html)
         else:
+            a_html, i = pull_images(a_html)
+            imgs += i
             d.html(q_html, prefix_runs=d.run("Q. ", b=True, color="888888"))
             d.html(a_html, prefix_runs=d.run("A. ", b=True, color="888888"))
         for name, html in extras:
-            d.html(html, prefix_runs=d.run(f"{name} · ", b=True, color="888888"))
+            html, i = pull_images(html)
+            imgs += i
+            if CT.plain(html).strip():
+                d.html(html, prefix_runs=d.run(f"{name} · ", b=True, color="888888"))
+        # 사진: 한 줄에 2장 (1장이면 조금 크게)
+        names = [m.group(1) for m in (re.search(r'src\s*=\s*["\']([^"\']+)', x) for x in imgs) if m]
+        names = [n for n in names if "://" not in n and not n.startswith("data:")]
+        if len(names) == 1:
+            d.para(d.image(names[0], max_w_cm=12.0, max_h_cm=10.0))
+        for k in range(0, len(names) if len(names) > 1 else 0, 2):
+            pair = names[k:k + 2]
+            d.para(d.run("  ").join(d.image(n, max_w_cm=8.0, max_h_cm=7.0) for n in pair) if len(pair) == 2
+                   else d.image(pair[0], max_w_cm=8.0, max_h_cm=7.0))
         if cfg.get("show_meta", True):
             meta = r.meta_for(c).lstrip("> ").replace("`", "")
             d.para(d.run(meta, color="999999", size=16))
@@ -257,6 +277,7 @@ STYLES = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="280" w:after="100"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="220" w:after="80"/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:color w:val="444444"/><w:sz w:val="24"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:pBdr><w:top w:val="single" w:sz="4" w:space="6" w:color="DDDDDD"/></w:pBdr><w:spacing w:before="240" w:after="60"/><w:outlineLvl w:val="3"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="CardSep"><w:name w:val="카드 구분"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="DDDDDD"/></w:pBdr><w:spacing w:before="200" w:after="0" w:line="120" w:lineRule="exact"/></w:pPr><w:rPr><w:sz w:val="4"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:left="400"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="Memo"><w:name w:val="내 메모"/><w:basedOn w:val="Normal"/><w:pPr><w:pBdr><w:left w:val="single" w:sz="18" w:space="6" w:color="5B8DEF"/></w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="F3F6FB"/><w:spacing w:after="0"/><w:ind w:left="120" w:right="120"/></w:pPr></w:style>
 </w:styles>"""

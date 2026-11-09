@@ -7,7 +7,7 @@ from core.writer import parse_blocks, extract_memo
 from core.docx_writer import build_docx
 colpath, out = sys.argv[1], sys.argv[2]
 col = Collection(colpath)
-ucfg = {"output_dir": out}
+ucfg = {"output_dir": out, "deck_filter": sys.argv[3] if len(sys.argv) > 3 else ""}
 cfg = C.merged(ucfg)
 t=time.time(); res = pipeline.run(col, ucfg, out+"_state", force=True); print("md:", res.summary(), round(time.time()-t,1),"s")
 md = open(f"{out}/복습 카드.md").read()

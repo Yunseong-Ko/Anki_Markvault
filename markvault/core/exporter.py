@@ -22,11 +22,20 @@ body { font-family: -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto
        font-size: 11pt; line-height: 1.55; color: #222; }
 h1 { font-size: 20pt; margin: 0 0 4pt; }
 .sub { color: #777; font-size: 9.5pt; margin-bottom: 18pt; }
-h2 { font-size: 13pt; margin: 22pt 0 8pt; padding-bottom: 3pt; border-bottom: 1.5px solid #333; page-break-after: avoid; }
+h2 { font-size: 15pt; margin: 26pt 0 8pt; padding-bottom: 3pt; border-bottom: 2px solid #222; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 18pt 0 6pt; color: #333; page-break-after: avoid; }
+h4 { font-size: 11pt; margin: 12pt 0 4pt; color: #666; font-weight: 600; page-break-after: avoid; }
+.no { color: #aaa; font-size: 8.5pt; margin-right: 4pt; }
 .card { page-break-inside: avoid; padding: 8pt 0 10pt; border-bottom: 1px solid #e3e3e3; }
 .card h3 { font-size: 11.5pt; margin: 0 0 5pt; font-weight: 600; }
 .body { margin-left: 2pt; }
-.body img { max-width: 100%; max-height: 70mm; display: block; margin: 4pt 0; }
+.body img { max-width: 100% !important; width: auto !important; height: auto !important; }
+.imgs { display: grid; grid-template-columns: 1fr 1fr; gap: 6pt; margin: 6pt 0 2pt; }
+.imgs.one { grid-template-columns: 1fr; }
+.imgs div { display: flex; align-items: flex-start; justify-content: center; }
+.imgs img { max-width: 100% !important; max-height: 75mm !important; width: auto !important; height: auto !important;
+            object-fit: contain; page-break-inside: avoid; }
+.imgs.one img { max-height: 95mm !important; }
 .cloze { background: #fff3a3; padding: 0 2px; border-radius: 2px; font-weight: 600; }
 .cloze-inactive { color: inherit; }
 .hidden .cloze { background: #333; color: #333; }
@@ -91,74 +100,94 @@ def filter_cards(cards: List[CardInfo], scope: str, deck: str = "", min_lapses: 
     return cards
 
 
+_RE_IMG_TAG = re.compile(r"<img\b[^>]*>", re.I)
+_RE_EMPTY_BLOCK = re.compile(r"<(div|p|span)\b[^>]*>\s*(<br\s*/?>|&nbsp;|\s)*</\1>", re.I)
+
+
+def pull_images(html: str):
+    """html 에서 <img> 를 빼서 따로 모은다 (사진은 카드 끝에 2열로 배치하기 위해)."""
+    imgs = _RE_IMG_TAG.findall(html)
+    rest = _RE_IMG_TAG.sub("", html)
+    for _ in range(3):
+        rest = _RE_EMPTY_BLOCK.sub("", rest)
+    return rest, imgs
+
+
+def _strip_size(img: str) -> str:
+    """AnKing 그림의 width/height/style 은 비율을 깨므로 지운다."""
+    return re.sub(r'\s(width|height|style)\s*=\s*("[^"]*"|\'[^\']*\'|\S+)', "", img, flags=re.I)
+
+
 def build_html(cards: List[CardInfo], cfg: dict, r: Renderer, mode: str = "read",
                memos: Optional[dict] = None, title: str = "Anki 복습", media_dir: str = "",
                extra_head: str = "") -> str:
-    """mode: read(정답 보임) | check(문제만, 정답은 끝에) | anki(카드 CSS 그대로)
-    media_dir 를 주면 이미지가 file:// 절대경로로 바뀐다. extra_head 는 MathJax 등 스크립트."""
+    """mode: read(정답 보임) | check(빈칸·문제만, 정답은 끝에)
+    덱은 공통 앞부분을 빼고 단계별 제목(계통 → 주제 → 소주제)으로. 카드 제목 줄은 본문과 중복이라 넣지 않는다.
+    사진은 비율을 지키며 카드 끝에 2열로."""
+    from .decknames import common_prefix, heading_levels
     memos = memos or {}
     base = ("file://" + media_dir.replace("\\", "/").rstrip("/") + "/") if media_dir else ""
     if base and not base.startswith("file:///"):
         base = base.replace("file://", "file:///", 1)
-    by_deck: "OrderedDict[str, List[CardInfo]]" = OrderedDict()
-    for c in cards:
-        by_deck.setdefault(c.deck, []).append(c)
+    prefix = common_prefix((c.deck for c in cards), cfg.get("deck_filter", ""))
 
-    out = [f"<!doctype html><html><head><meta charset='utf-8'><style>{CSS}</style>"]
-    if mode == "anki":
-        seen = set()
-        for c in cards:
-            if c.css and c.notetype not in seen:
-                seen.add(c.notetype)
-                out.append(f"<style>{c.css}</style>")
-    out.append(extra_head)
-    out.append("</head><body>")
+    out = [f"<!doctype html><html><head><meta charset='utf-8'><style>{CSS}</style>", extra_head, "</head><body>"]
     out.append(f"<h1>{htmllib.escape(title)}</h1>")
-    out.append(f"<div class='sub'>카드 {sum(len(c.cids or [c.cid]) for c in cards)}장 · 노트 {len(cards)}개 · {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
-               f"{htmllib.escape(C.effective_query(cfg))}</div>")
-
-    # 목차
-    out.append("<div class='toc'><ul>")
-    for deck, cs in by_deck.items():
-        out.append(f"<li>{htmllib.escape(deck.replace('::', ' › '))} <span class='n'>({len(cs)}장)</span><ul>")
-        if len(cards) <= 150:
-            for c in cs:
-                out.append(f"<li>{htmllib.escape(r.title_for(c))}</li>")
-        out.append("</ul></li>")
-    out.append("</ul></div><div class='pagebreak'></div>")
+    scope = " › ".join(prefix) if prefix else "전체"
+    out.append(f"<div class='sub'>{htmllib.escape(scope)} · 카드 {sum(len(c.cids or [c.cid]) for c in cards)}장 · "
+               f"노트 {len(cards)}개 · {datetime.now().strftime('%Y-%m-%d')}</div>")
 
     answers = []
-    for deck, cs in by_deck.items():
-        out.append(f"<h2>{htmllib.escape(deck.replace('::', ' › '))}</h2>")
-        for c in cs:
-            title = htmllib.escape(r.title_for(c))
-            q_html, a_html, extras = card_parts(c, mode, base)
-            meta = r.meta_for(c).lstrip("> ").replace("`", "")
-            out.append(f"<div class='card'><h3>{title}</h3><div class='body'>")
-            if a_html is None:                       # cloze 읽기용 / io / 템플릿
-                out.append(f"<div>{q_html}</div>")
+    printed: List[str] = []
+    for no, c in enumerate(cards, 1):
+        levels = heading_levels(c.deck, prefix)
+        for depth, name in enumerate(levels):
+            if levels[: depth + 1] != printed[: depth + 1]:
+                tag = ("h2", "h3", "h4")[min(depth, 2)]
+                out.append(f"<{tag}>{htmllib.escape(name)}</{tag}>")
+        printed = levels
+
+        q_html, a_html, extras = card_parts(c, mode, base)
+        imgs: List[str] = []
+        q_html, i1 = pull_images(q_html)
+        imgs += i1
+        out.append("<div class='card'><div class='body'>")
+        num = f"<span class='no'>{no}</span>" if mode == "check" else ""
+        if a_html is None:
+            out.append(f"<div>{num}{q_html}</div>")
+        else:
+            a_html, i2 = pull_images(a_html)
+            out.append(f"<div class='q'>{num}<span class='lbl'>Q</span>{q_html}</div>")
+            if mode == "check":
+                answers.append((no, a_html, i2))
             else:
-                out.append(f"<div class='q'><span class='lbl'>Q</span>{q_html}</div>")
-                if mode == "check":
-                    answers.append((title, a_html))
-                else:
-                    out.append(f"<div class='a'><span class='lbl'>A</span>{a_html}</div>")
+                imgs += i2
+                out.append(f"<div class='a'><span class='lbl'>A</span>{a_html}</div>")
+        if mode != "check":
             for name, html in extras:
-                if mode == "check":
-                    continue
-                out.append(f"<div class='extra'><span class='lbl'>{htmllib.escape(name)}</span>{html}</div>")
-            out.append("</div>")
-            if cfg.get("show_meta", True):
-                out.append(f"<div class='meta'>{htmllib.escape(meta)}</div>")
-            memo = _find_memo(memos, c)
-            if memo:
-                body = "<br>".join(htmllib.escape(l.lstrip("> ")) for l in memo.split("\n")[1:])
-                out.append(f"<div class='memo'>{body}</div>")
-            out.append("</div>")
+                html, i3 = pull_images(html)
+                imgs += i3
+                if CT.plain(html).strip():
+                    out.append(f"<div class='extra'><span class='lbl'>{htmllib.escape(name)}</span>{html}</div>")
+        if imgs:
+            cls = "imgs one" if len(imgs) == 1 else "imgs"
+            out.append(f"<div class='{cls}'>" + "".join(f"<div>{_strip_size(i)}</div>" for i in imgs) + "</div>")
+        out.append("</div>")
+        if cfg.get("show_meta", True):
+            meta = r.meta_for(c).lstrip("> ").replace("`", "")
+            out.append(f"<div class='meta'>{htmllib.escape(meta)}</div>")
+        memo = _find_memo(memos, c)
+        if memo:
+            body = "<br>".join(htmllib.escape(l.lstrip("> ")) for l in memo.split("\n")[1:])
+            out.append(f"<div class='memo'>{body}</div>")
+        out.append("</div>")
     if mode == "check" and answers:
         out.append("<div class='pagebreak'></div><h2>정답</h2><div class='answers'>")
-        for t, a in answers:
-            out.append(f"<h4>{htmllib.escape(t)}</h4><div class='body'>{a}</div>")
+        for no, a, ims in answers:
+            out.append(f"<div class='card'><span class='no'>{no}</span>{a}")
+            if ims:
+                out.append("<div class='imgs'>" + "".join(f"<div>{_strip_size(i)}</div>" for i in ims) + "</div>")
+            out.append("</div>")
         out.append("</div>")
     out.append("</body></html>")
     return "\n".join(out)

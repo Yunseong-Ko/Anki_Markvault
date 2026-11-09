@@ -7,6 +7,8 @@ DEFAULTS = {
     "output_dir": "",
     # Anki 검색식
     "query": "flag:1 OR tag:marked",
+    # 이 덱(하위 덱 포함)만. 비우면 전체. 예: "AnKing Step Deck::Bootcamp"
+    "deck_filter": "",
     # none | flag | deck  — 파일을 어떻게 나눌지
     "split_by": "none",
     "single_file_name": "복습 카드",
@@ -45,6 +47,11 @@ def effective_query(cfg) -> str:
     n = int(cfg.get("auto_include_lapses") or 0)
     if n > 0:
         q = f"({q}) OR prop:lapses>={n}"
+    deck = (cfg.get("deck_filter") or "").strip()
+    if deck:
+        # 따옴표·밑줄·별표가 덱 이름에 있어도 글자 그대로 찾도록 이스케이프
+        esc = deck.replace("\\", "\\\\").replace('"', '\\"').replace("_", "\\_").replace("*", "\\*")
+        q = f'({q}) "deck:{esc}"'
     return q
 
 
