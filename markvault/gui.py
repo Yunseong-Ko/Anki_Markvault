@@ -44,6 +44,10 @@ class SettingsDialog(QDialog):
         self.lapses.setSpecialValueText("끔")
         form.addRow("실패 N회 이상 자동 포함", self.lapses)
 
+        self.extra = QLineEdit(", ".join(cfg.get("extra_fields") or []))
+        form.addRow("본문에 덧붙일 필드", self.extra)
+        form.addRow("", QLabel("<small>쉼표로 구분. 여기 없는 필드(예: AnKing 의 Sketchy, Boards and Beyond)는 빠져요.</small>"))
+
         self.split = QComboBox()
         self.split.addItems(["파일 하나", "플래그 색별 파일", "최상위 덱별 파일"])
         self.split.setCurrentIndex({"none": 0, "flag": 1, "deck": 2}.get(cfg["split_by"], 0))
@@ -102,6 +106,7 @@ class SettingsDialog(QDialog):
         cfg["output_dir"] = self.out_dir.text().strip()
         cfg["query"] = self.query.text().strip() or C.DEFAULTS["query"]
         cfg["auto_include_lapses"] = self.lapses.value()
+        cfg["extra_fields"] = [x.strip() for x in self.extra.text().split(",") if x.strip()]
         cfg["split_by"] = ["none", "flag", "deck"][self.split.currentIndex()]
         cfg["cloze_mode"] = "highlight" if self.cloze.currentIndex() == 0 else "qa"
         cfg["image_link_style"] = "markdown" if self.img.currentIndex() == 0 else "wikilink"
@@ -136,7 +141,7 @@ class ExportDialog(QDialog):
         form.addRow("실패 N회", self.min_lapses)
 
         self.mode = QComboBox()
-        self.mode.addItems(["읽기용 — 정답 바로 보임", "확인용 — 문제만, 정답은 마지막 장", "Anki 그대로 — 카드 CSS 적용"])
+        self.mode.addItems(["읽기용 — 정답 바로 보임", "확인용 — 빈칸·문제만, 정답은 마지막 장"])
         form.addRow("모양", self.mode)
 
         self.fmt = QComboBox()
@@ -161,7 +166,7 @@ class ExportDialog(QDialog):
 
     def _export(self):
         scope = ["all", "deck", "week", "lapses"][self.scope.currentIndex()]
-        mode = ["read", "check", "anki"][self.mode.currentIndex()]
+        mode = ["read", "check"][self.mode.currentIndex()]
         is_pdf = self.fmt.currentIndex() == 0
         stamp = datetime.now().strftime("%Y%m%d")
         default = os.path.join(self.cfg["output_dir"], f"Anki 복습 {stamp}.{'pdf' if is_pdf else 'docx'}")
@@ -173,7 +178,7 @@ class ExportDialog(QDialog):
         deck, min_l = self.deck.currentText(), self.min_lapses.value()
 
         def op(col):
-            cards = collect(col, C.effective_query(cfg))
+            cards = collect(col, C.effective_query(cfg), cfg.get("extra_fields"))
             r = Renderer(cfg, col.media.dir(), cfg["output_dir"])
             w = Writer(cfg, r, state_dir=state_dir)
             cards = exporter.filter_cards(cards, scope, deck, min_l, w.state.get("cards"))

@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from . import content as CT
+
 
 @dataclass
 class CardInfo:
@@ -20,9 +22,12 @@ class CardInfo:
     ivl: int
     last_review: Optional[float]   # epoch seconds
     tags: List[str] = field(default_factory=list)
-    question_html: str = ""
+    question_html: str = ""      # 템플릿으로 그린 것 (필드에서 못 뽑을 때만 채움)
     answer_html: str = ""
     css: str = ""
+    content: Optional[CT.Content] = None   # 필드에서 뽑은 본문
+    ords: List[int] = field(default_factory=list)   # 합쳐진 카드들의 번호 (cloze 강조용)
+    cids: List[int] = field(default_factory=list)   # 합쳐진 카드들
 
     @property
     def group_keys(self):
@@ -57,17 +62,26 @@ def signature(col, query: str) -> str:
     return h.hexdigest()
 
 
-def collect(col, query: str) -> List[CardInfo]:
+def collect(col, query: str, extra_fields: Optional[List[str]] = None) -> List[CardInfo]:
     out = []
     for cid in col.find_cards(query):
         card = col.get_card(cid)
         note = card.note()
         nt = card.note_type()
         try:
-            r = card.render_output()
-            q, a, css = r.question_text, r.answer_text, r.css
-        except Exception as e:  # 템플릿이 깨진 카드도 건너뛰지 않음
-            q, a, css = "", f"(렌더 실패: {e})", ""
+            ct = CT.build(note, nt, card.ord, extra_fields)
+        except Exception:  # 이상한 노트 유형이어도 멈추지 않음
+            ct = CT.Content(kind="template")
+        q = a = css = ""
+        if CT.is_empty(ct.question_html):
+            # 필드에서 못 뽑았으면 템플릿 결과를 쓴다
+            ct.kind = "template"
+            try:
+                r = card.render_output()
+                q, a, css = CT.clean(r.question_text), CT.clean(r.answer_text), r.css
+            except Exception as e:
+                q, a = "", f"(렌더 실패: {e})"
+            ct.title = CT.first_line(q) or ct.title
         last = col.db.scalar("select max(id) from revlog where cid=?", cid)
         out.append(CardInfo(
             cid=cid, nid=note.id,
@@ -77,8 +91,33 @@ def collect(col, query: str) -> List[CardInfo]:
             ord=card.ord, reps=card.reps, lapses=card.lapses, ivl=card.ivl,
             last_review=(last / 1000) if last else None,
             tags=list(note.tags),
-            question_html=q, answer_html=a, css=css,
+            question_html=q, answer_html=a, css=css, content=ct,
         ))
     # 덱 경로 → 노트 생성순 → 카드 순서
     out.sort(key=lambda c: (c.deck.lower(), c.nid, c.ord))
+    return merge_siblings(out)
+
+
+def merge_siblings(cards: List[CardInfo]) -> List[CardInfo]:
+    """같은 노트의 카드(c1, c2 …)는 한 블록으로. 대표 cid 는 가장 작은 것."""
+    merged: "dict[int, CardInfo]" = {}
+    order = []
+    for c in cards:
+        c.ords = c.ords or [c.ord]
+        c.cids = c.cids or [c.cid]
+        g = merged.get(c.nid)
+        if g is None:
+            merged[c.nid] = c
+            order.append(c.nid)
+            continue
+        g.ords.append(c.ord)
+        g.cids.append(c.cid)
+        g.flag = g.flag or c.flag
+        g.reps = max(g.reps, c.reps)
+        g.lapses = max(g.lapses, c.lapses)
+        if c.last_review and (not g.last_review or c.last_review > g.last_review):
+            g.last_review = c.last_review
+    out = [merged[n] for n in order]
+    for g in out:
+        g.cid = min(g.cids)
     return out

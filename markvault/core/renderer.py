@@ -14,9 +14,15 @@ from datetime import datetime
 from typing import Dict, List
 
 from . import config as C
+from . import content as CT
 from .collector import CardInfo
 
 from markdownify import MarkdownConverter  # noqa: E402  (vendor path 는 core/__init__ 에서)
+
+
+def _cloze_md(html: str) -> str:
+    """content 가 만든 <span class="cloze">x</span> → 형광펜 토큰 (markdownify 가 span 을 지우므로 미리)."""
+    return _RE_CLOZE.sub(lambda m: f"=={m.group(1)}==", html)
 
 
 class _Conv(MarkdownConverter):
@@ -104,6 +110,8 @@ class Renderer:
         for k, v in tokens.items():
             md = md.replace(k, v)
         md = re.sub(r"[ \t]+\n", "\n", md)
+        md = re.sub(r"(\\\n)+(?=\n|$)", "\n", md)   # 끝에 남은 줄바꿈 표시(\) 제거
+        md = re.sub(r"\\$", "", md.strip())
         md = re.sub(r"\n{3,}", "\n\n", md).strip()
         if is_io:
             md += "\n\n*(Image Occlusion 카드 — 가림막은 Anki 에서 확인)*"
@@ -111,39 +119,44 @@ class Renderer:
 
     # ---- 카드 한 장 ----------------------------------------------------
     def _split_qa(self, info: CardInfo):
-        """answer_text 는 보통 '문제 <hr id=answer> 정답'. 갈라서 정답 부분만 얻는다."""
+        """템플릿 결과의 answer_text 는 보통 '문제 <hr id=answer> 정답'."""
         parts = _HR.split(info.answer_html, maxsplit=1)
         if len(parts) == 2:
             return info.question_html, parts[1]
         return info.question_html, info.answer_html
 
     def title_for(self, info: CardInfo) -> str:
-        if info.is_cloze:
-            src = _RE_CLOZE.sub(lambda m: m.group(1), _HR.split(info.answer_html)[-1])
-            src = _RE_CLOZE_INACTIVE.sub(lambda m: m.group(1), src)
-        else:
-            src = info.question_html
-        # 첫 줄만 제목으로
-        src = re.split(r"<br\s*/?>|<div\b|<p\b|<li\b|<hr\b|\n", src, maxsplit=1)[0]
-        t = _plain(src)
-        t = t.replace("[...]", "…")
-        return (t[:70] + "…") if len(t) > 70 else (t or "(제목 없음)")
+        t = (info.content.title if info.content else "") or ""
+        return t.replace("[", "(").replace("]", ")") or "(내용 없음)"
 
     def body_for(self, info: CardInfo) -> str:
-        q_html, a_html = self._split_qa(info)
-        if info.is_cloze and self.cfg["cloze_mode"] == "highlight":
+        ct = info.content
+        out = []
+        if ct is None or ct.kind == "template":
+            q_html, a_html = self._split_qa(info)
             a = _RE_CLOZE.sub(lambda m: f"=={m.group(1)}==", a_html)
             a = _RE_CLOZE_INACTIVE.sub(lambda m: m.group(1), a)
-            return self.html_to_md(a)
-        if info.is_cloze:
-            q = _RE_CLOZE_INACTIVE.sub(lambda m: m.group(1), q_html)
-            a = _RE_CLOZE.sub(lambda m: f"**{m.group(1)}**", a_html)
-            a = _RE_CLOZE_INACTIVE.sub(lambda m: m.group(1), a)
-            return f"**Q.** {self.html_to_md(q)}\n\n**A.** {self.html_to_md(a)}"
-        q_md, a_md = self.html_to_md(q_html), self.html_to_md(a_html)
-        if not a_md:
-            return q_md
-        return f"**Q.** {q_md}\n\n**A.** {a_md}"
+            out.append(self.html_to_md(a))
+        elif ct.kind == "cloze":
+            if self.cfg["cloze_mode"] == "highlight":
+                out.append(self.html_to_md(_cloze_md(CT.cloze_to_html(ct.question_html, info.ords or [info.ord]))))
+            else:
+                out.append("**Q.** " + self.html_to_md(_cloze_md(CT.cloze_to_html(ct.question_html, info.ords or [info.ord], hidden=True))))
+                out.append("**A.** " + self.html_to_md(_cloze_md(CT.cloze_to_html(ct.question_html, info.ords or [info.ord]))))
+        elif ct.kind == "io":
+            out.append(self.html_to_md(ct.question_html))
+            out.append("*(Image Occlusion 카드 — 가림막은 Anki 에서)*")
+        else:
+            q_md, a_md = self.html_to_md(ct.question_html), self.html_to_md(ct.answer_html)
+            sep = lambda m: "\n\n" if ("\n" in m or m.startswith(("-", "1.", "!["))) else " "
+            out.append(f"**Q.**{sep(q_md)}{q_md}")
+            if a_md:
+                out.append(f"**A.**{sep(a_md)}{a_md}")
+        for name, html in (ct.extras if ct else []):
+            md = self.html_to_md(html)
+            if md:
+                out.append(f"**{name}** · {md}")
+        return "\n\n".join(x for x in out if x.strip())
 
     def meta_for(self, info: CardInfo) -> str:
         names = self.cfg["flag_names"]
@@ -154,6 +167,8 @@ class Renderer:
             parts.append(f"{C.FLAG_EMOJI['marked']} {names.get('marked', 'Mark')}".strip())
         if not info.flag and not info.marked:
             parts.append(f"⚠ {names.get('0', '자동 포함')}")
+        if len(info.cids or []) > 1:
+            parts.append(f"카드 {len(info.cids)}장")
         if info.reps:
             parts.append(f"복습 {info.reps}회")
         if info.lapses:
@@ -164,7 +179,7 @@ class Renderer:
         return "> " + " · ".join(parts)
 
     def render_block(self, info: CardInfo) -> str:
-        lines = [f"### {self.title_for(info)}", f"%% cid:{info.cid} %%", "", self.body_for(info)]
+        lines = [f"### {self.title_for(info)}", f"%% cid:{info.cid} nid:{info.nid} %%", "", self.body_for(info)]
         if self.cfg.get("show_meta", True):
             lines += ["", self.meta_for(info)]
         return "\n".join(lines).rstrip() + "\n"

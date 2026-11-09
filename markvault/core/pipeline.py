@@ -19,7 +19,7 @@ def run(col, user_cfg: dict, state_dir: str, force: bool = False) -> Optional[Re
     # 출력 폴더가 없으면(지웠거나 처음) 서명이 같아도 다시 만든다
     if not force and sig == _last_sig and os.path.isdir(cfg["output_dir"]):
         return None
-    cards = collect(col, q)
+    cards = collect(col, q, cfg.get("extra_fields"))
     r = Renderer(cfg, col.media.dir(), cfg["output_dir"])
     w = Writer(cfg, r, state_dir=state_dir)
     res = w.write(cards)

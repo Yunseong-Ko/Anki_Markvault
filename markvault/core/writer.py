@@ -11,7 +11,7 @@ from . import config as C
 from .collector import CardInfo
 from .renderer import Renderer
 
-_RE_CID = re.compile(r"^%% cid:(\d+) %%\s*$", re.M)
+_RE_CID = re.compile(r"^%% cid:(\d+)(?: nid:(\d+))? %%\s*$", re.M)
 _RE_STAMP = re.compile(r"갱신 \d{4}-\d{2}-\d{2} \d{2}:\d{2}")
 _RE_MEMO_START = re.compile(r"^> \[!(?:note|memo|메모)\]", re.I)
 HEADER_NOTE = "<!-- MarkVault 가 자동으로 만든 파일. 카드 블록은 다음 갱신 때 덮어써지지만 `> [!note]` 콜아웃은 cid 기준으로 보존됩니다. -->"
@@ -27,8 +27,12 @@ class Result:
     new_cards: int = 0
     media_copied: int = 0
 
+    total_cards: int = 0
+
     def summary(self) -> str:
-        s = f"카드 {self.total}장"
+        s = f"카드 {self.total_cards or self.total}장"
+        if self.total_cards and self.total_cards != self.total:
+            s += f"(노트 {self.total}개)"
         if self.new_cards:
             s += f" (+{self.new_cards})"
         if self.removed_cards:
@@ -57,7 +61,14 @@ def parse_blocks(text: str) -> "OrderedDict[int, str]":
         m = _RE_CID.search(seg)
         if m:
             blocks[int(m.group(1))] = seg.rstrip()
+            if m.group(2):  # nid 로도 찾을 수 있게
+                blocks.setdefault(-int(m.group(2)), seg.rstrip())
     return blocks
+
+
+def find_memo(memos: Dict[int, str], c: CardInfo) -> str:
+    """메모는 노트(nid, 음수 키) → 대표 cid → 합쳐진 cid 순으로 찾는다."""
+    return memos.get(-c.nid) or memos.get(c.cid) or next((memos[x] for x in (c.cids or []) if x in memos), "")
 
 
 def extract_memo(block: str) -> str:
@@ -122,7 +133,7 @@ class Writer:
             parts.append("")
             for c in cs:
                 block = self.r.render_block(c)
-                memo = memos.get(c.cid)
+                memo = find_memo(memos, c)
                 if memo:
                     block = block.rstrip() + "\n\n" + memo + "\n"
                 parts.append(block)
@@ -142,7 +153,7 @@ class Writer:
 
     # ---- 메인 --------------------------------------------------------
     def write(self, cards: List[CardInfo]) -> Result:
-        res = Result(total=len(cards))
+        res = Result(total=len(cards), total_cards=sum(len(c.cids or [c.cid]) for c in cards))
         os.makedirs(self.out, exist_ok=True)
         today = date.today().isoformat()
 

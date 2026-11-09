@@ -8,7 +8,12 @@ from datetime import date, datetime
 from typing import List, Optional
 
 from . import config as C
+from . import content as CT
 from .collector import CardInfo
+
+
+def _find_memo(memos, c):
+    return memos.get(-c.nid) or memos.get(c.cid) or next((memos[x] for x in (c.cids or []) if x in memos), "")
 from .renderer import _HR, _RE_CLOZE, _RE_CLOZE_INACTIVE, _RE_IO, _RE_SOUND, Renderer
 
 CSS = """
@@ -25,7 +30,7 @@ h2 { font-size: 13pt; margin: 22pt 0 8pt; padding-bottom: 3pt; border-bottom: 1.
 .cloze { background: #fff3a3; padding: 0 2px; border-radius: 2px; font-weight: 600; }
 .cloze-inactive { color: inherit; }
 .hidden .cloze { background: #333; color: #333; }
-.q { margin-bottom: 4pt; } .a { padding-left: 10pt; border-left: 3px solid #ddd; }
+.q { margin-bottom: 4pt; } .a { padding-left: 10pt; border-left: 3px solid #ddd; } .extra { margin-top: 4pt; font-size: 10pt; color: #444; }
 .lbl { color: #999; font-size: 9pt; margin-right: 4pt; }
 .meta { color: #888; font-size: 8.5pt; margin-top: 5pt; }
 .memo { background: #f3f6fb; border-left: 3px solid #5b8def; padding: 5pt 8pt; margin-top: 6pt; font-size: 10pt; }
@@ -36,14 +41,11 @@ h2 { font-size: 13pt; margin: 22pt 0 8pt; padding-bottom: 3pt; border-bottom: 1.
 
 
 _RE_IMG = re.compile(r'(<img\b[^>]*?\bsrc\s*=\s*["\'])([^"\']+)(["\'])', re.I)
-_MEDIA_BASE = ""
-
-
-def _strip(html: str) -> str:
+def _strip(html: str, media_base: str = "") -> str:
     html = _RE_SOUND.sub("", html)
-    if _MEDIA_BASE:
+    if media_base:
         html = _RE_IMG.sub(lambda m: m.group(1) + (m.group(2) if "://" in m.group(2) or m.group(2).startswith("data:")
-                                                  else _MEDIA_BASE + m.group(2)) + m.group(3), html)
+                                                  else media_base + m.group(2)) + m.group(3), html)
     if "image-occlusion" in html:
         html = _RE_IO.sub("", html)
     return html
@@ -52,6 +54,23 @@ def _strip(html: str) -> str:
 def _answer_part(info: CardInfo) -> str:
     parts = _HR.split(info.answer_html, maxsplit=1)
     return parts[1] if len(parts) == 2 else info.answer_html
+
+
+def card_parts(c: CardInfo, mode: str, media_base: str = ""):
+    """(문제 html, 정답 html 또는 None, 추가 필드들). media_base 를 주면 이미지 경로를 절대경로로."""
+    ct = c.content
+    fix = lambda h: _strip(h, media_base)  # noqa: E731
+    if ct is None or ct.kind == "template":
+        return fix(_answer_part(c)), None, []
+    extras = [(n, fix(h)) for n, h in ct.extras]
+    if ct.kind == "cloze":
+        if mode == "check":
+            return (fix(CT.cloze_to_html(ct.question_html, c.ords or [c.ord], hidden=True)),
+                    fix(CT.cloze_to_html(ct.question_html, c.ords or [c.ord])), extras)
+        return fix(CT.cloze_to_html(ct.question_html, c.ords or [c.ord])), None, extras
+    if ct.kind == "io":
+        return fix(ct.question_html), None, extras
+    return fix(ct.question_html), fix(ct.answer_html), extras
 
 
 def filter_cards(cards: List[CardInfo], scope: str, deck: str = "", min_lapses: int = 3,
@@ -77,11 +96,10 @@ def build_html(cards: List[CardInfo], cfg: dict, r: Renderer, mode: str = "read"
                extra_head: str = "") -> str:
     """mode: read(정답 보임) | check(문제만, 정답은 끝에) | anki(카드 CSS 그대로)
     media_dir 를 주면 이미지가 file:// 절대경로로 바뀐다. extra_head 는 MathJax 등 스크립트."""
-    global _MEDIA_BASE
     memos = memos or {}
-    _MEDIA_BASE = ("file://" + media_dir.replace("\\", "/").rstrip("/") + "/") if media_dir else ""
-    if _MEDIA_BASE and not _MEDIA_BASE.startswith("file:///"):
-        _MEDIA_BASE = _MEDIA_BASE.replace("file://", "file:///", 1)
+    base = ("file://" + media_dir.replace("\\", "/").rstrip("/") + "/") if media_dir else ""
+    if base and not base.startswith("file:///"):
+        base = base.replace("file://", "file:///", 1)
     by_deck: "OrderedDict[str, List[CardInfo]]" = OrderedDict()
     for c in cards:
         by_deck.setdefault(c.deck, []).append(c)
@@ -96,15 +114,16 @@ def build_html(cards: List[CardInfo], cfg: dict, r: Renderer, mode: str = "read"
     out.append(extra_head)
     out.append("</head><body>")
     out.append(f"<h1>{htmllib.escape(title)}</h1>")
-    out.append(f"<div class='sub'>{len(cards)}장 · {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
+    out.append(f"<div class='sub'>카드 {sum(len(c.cids or [c.cid]) for c in cards)}장 · 노트 {len(cards)}개 · {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
                f"{htmllib.escape(C.effective_query(cfg))}</div>")
 
     # 목차
     out.append("<div class='toc'><ul>")
     for deck, cs in by_deck.items():
         out.append(f"<li>{htmllib.escape(deck.replace('::', ' › '))} <span class='n'>({len(cs)}장)</span><ul>")
-        for c in cs:
-            out.append(f"<li>{htmllib.escape(r.title_for(c))}</li>")
+        if len(cards) <= 150:
+            for c in cs:
+                out.append(f"<li>{htmllib.escape(r.title_for(c))}</li>")
         out.append("</ul></li>")
     out.append("</ul></div><div class='pagebreak'></div>")
 
@@ -112,28 +131,26 @@ def build_html(cards: List[CardInfo], cfg: dict, r: Renderer, mode: str = "read"
     for deck, cs in by_deck.items():
         out.append(f"<h2>{htmllib.escape(deck.replace('::', ' › '))}</h2>")
         for c in cs:
-            q_html = _strip(c.question_html)
-            a_html = _strip(_answer_part(c))
+            title = htmllib.escape(r.title_for(c))
+            q_html, a_html, extras = card_parts(c, mode, base)
             meta = r.meta_for(c).lstrip("> ").replace("`", "")
-            out.append(f"<div class='card'><h3>{htmllib.escape(r.title_for(c))}</h3>")
-            if mode == "anki":
-                out.append(f"<div class='body card'>{_strip(c.answer_html)}</div>")
-            elif c.is_cloze:
-                if mode == "check":
-                    out.append(f"<div class='body hidden'>{a_html}</div>")
-                    answers.append((r.title_for(c), a_html))
-                else:
-                    out.append(f"<div class='body'>{a_html}</div>")
+            out.append(f"<div class='card'><h3>{title}</h3><div class='body'>")
+            if a_html is None:                       # cloze 읽기용 / io / 템플릿
+                out.append(f"<div>{q_html}</div>")
             else:
-                out.append(f"<div class='body'><div class='q'><span class='lbl'>Q</span>{q_html}</div>")
+                out.append(f"<div class='q'><span class='lbl'>Q</span>{q_html}</div>")
                 if mode == "check":
-                    answers.append((r.title_for(c), a_html))
+                    answers.append((title, a_html))
                 else:
                     out.append(f"<div class='a'><span class='lbl'>A</span>{a_html}</div>")
-                out.append("</div>")
+            for name, html in extras:
+                if mode == "check":
+                    continue
+                out.append(f"<div class='extra'><span class='lbl'>{htmllib.escape(name)}</span>{html}</div>")
+            out.append("</div>")
             if cfg.get("show_meta", True):
                 out.append(f"<div class='meta'>{htmllib.escape(meta)}</div>")
-            memo = memos.get(c.cid)
+            memo = _find_memo(memos, c)
             if memo:
                 body = "<br>".join(htmllib.escape(l.lstrip("> ")) for l in memo.split("\n")[1:])
                 out.append(f"<div class='memo'>{body}</div>")

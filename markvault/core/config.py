@@ -30,6 +30,9 @@ DEFAULTS = {
     "weekly_snapshot": False,
     # 카드 아래 메타 줄(복습 횟수, 마지막 복습 등)
     "show_meta": True,
+    # 본문 아래 이름표를 붙여 덧붙일 필드 (AnKing 의 Sketchy·B&B 같은 자료 칸은 기본 제외)
+    "extra_fields": ["Extra", "Back Extra", "Lecture Notes", "Missed Questions", "Personal Notes",
+                     "Notes", "Comments", "Explanation", "추가", "메모", "해설"],
     "show_tooltip": True,
 }
 

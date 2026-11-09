@@ -16,11 +16,17 @@ from xml.sax.saxutils import escape
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .collector import CardInfo
+
+
+def _find_memo(memos, c):
+    return memos.get(-c.nid) or memos.get(c.cid) or next((memos[x] for x in (c.cids or []) if x in memos), "")
+from .exporter import card_parts
 from .renderer import _HR, _RE_IO, _RE_SOUND, Renderer
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 MAX_IMG_CM = 15.0      # 본문 폭
 EMU_PER_CM = 360000
+_RE_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 _RE_MATH = re.compile(r"\\\((.+?)\\\)|\\\[(.+?)\\\]", re.S)
 BLOCKS = {"div", "p", "li", "ul", "ol", "table", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "hr"}
 
@@ -74,16 +80,16 @@ class _Doc:
             rpr += "<w:b/>"
         if i:
             rpr += "<w:i/>"
-        if u:
-            rpr += '<w:u w:val="single"/>'
         if color:
             rpr += f'<w:color w:val="{color}"/>'
         if size:
             rpr += f'<w:sz w:val="{size}"/>'
         if hl:
             rpr += f'<w:highlight w:val="{hl}"/>'
+        if u:
+            rpr += '<w:u w:val="single"/>'
         rpr = f"<w:rPr>{rpr}</w:rPr>" if rpr else ""
-        return f'<w:r>{rpr}<w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
+        return f'<w:r>{rpr}<w:t xml:space="preserve">{escape(_RE_CTRL.sub("", text))}</w:t></w:r>'
 
     def para(self, runs: str, style: Optional[str] = None, numbered: bool = False, extra_ppr: str = "") -> None:
         ppr = ""
@@ -98,6 +104,8 @@ class _Doc:
         src = os.path.join(self.media_dir, htmllib.unescape(name))
         if not os.path.exists(src):
             return self.run(f"[이미지 없음: {name}]", i=True, color="999999")
+        if os.path.splitext(name)[1].lower() not in (".png", ".jpg", ".jpeg", ".gif", ".bmp"):
+            return self.run(f"[그림: {name} — Word 에서 못 여는 형식]", i=True, color="999999")
         if name not in self.images:
             ext = os.path.splitext(name)[1].lower() or ".png"
             self.images[name] = f"media/image{len(self.images) + 1}{ext}"
@@ -204,7 +212,7 @@ def build_docx(cards: List[CardInfo], cfg: dict, r: Renderer, path: str, media_d
     memos = memos or {}
     d = _Doc(media_dir)
     d.para(d.run(title), style="Title")
-    d.para(d.run(f"{len(cards)}장 · {datetime.now().strftime('%Y-%m-%d %H:%M')}", color="888888", size=18))
+    d.para(d.run(f"카드 {sum(len(c.cids or [c.cid]) for c in cards)}장 · 노트 {len(cards)}개 · {datetime.now().strftime('%Y-%m-%d %H:%M')}", color="888888", size=18))
 
     printed: List[str] = []
     for c in cards:
@@ -217,17 +225,19 @@ def build_docx(cards: List[CardInfo], cfg: dict, r: Renderer, path: str, media_d
         printed = levels
 
         d.para(d.run(r.title_for(c)), style="Heading4")
-        a_html = _answer_part(c)
-        if c.is_cloze:
-            d.html(a_html)
+        q_html, a_html, extras = card_parts(c, "read")
+        if a_html is None:
+            d.html(q_html)
         else:
-            d.html(c.question_html, prefix_runs=d.run("Q. ", b=True, color="888888"))
+            d.html(q_html, prefix_runs=d.run("Q. ", b=True, color="888888"))
             d.html(a_html, prefix_runs=d.run("A. ", b=True, color="888888"))
+        for name, html in extras:
+            d.html(html, prefix_runs=d.run(f"{name} · ", b=True, color="888888"))
         if cfg.get("show_meta", True):
             meta = r.meta_for(c).lstrip("> ").replace("`", "")
             d.para(d.run(meta, color="999999", size=16))
         # 내 메모 칸
-        memo = memos.get(c.cid, "")
+        memo = _find_memo(memos, c)
         memo_lines = [l.lstrip(">").strip() for l in memo.split("\n")[1:]] if memo else []
         d.para(d.run("내 메모", b=True, color="5B8DEF", size=18), style="Memo")
         for line in (memo_lines or [""]):
@@ -243,12 +253,12 @@ STYLES = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:pPrDefault><w:pPr><w:spacing w:after="80" w:line="300" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
 <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
 <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="40"/></w:rPr></w:style>
-<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="360" w:after="120"/><w:pBdr><w:bottom w:val="single" w:sz="8" w:space="2" w:color="333333"/></w:pBdr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:pBdr><w:bottom w:val="single" w:sz="8" w:space="2" w:color="333333"/></w:pBdr><w:spacing w:before="360" w:after="120"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="280" w:after="100"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="220" w:after="80"/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:color w:val="444444"/><w:sz w:val="24"/></w:rPr></w:style>
-<w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="60"/><w:pBdr><w:top w:val="single" w:sz="4" w:space="6" w:color="DDDDDD"/></w:pBdr><w:outlineLvl w:val="3"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:pBdr><w:top w:val="single" w:sz="4" w:space="6" w:color="DDDDDD"/></w:pBdr><w:spacing w:before="240" w:after="60"/><w:outlineLvl w:val="3"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:left="400"/></w:pPr></w:style>
-<w:style w:type="paragraph" w:styleId="Memo"><w:name w:val="내 메모"/><w:basedOn w:val="Normal"/><w:pPr><w:shd w:val="clear" w:color="auto" w:fill="F3F6FB"/><w:ind w:left="120" w:right="120"/><w:spacing w:after="0"/><w:pBdr><w:left w:val="single" w:sz="18" w:space="6" w:color="5B8DEF"/></w:pBdr></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Memo"><w:name w:val="내 메모"/><w:basedOn w:val="Normal"/><w:pPr><w:pBdr><w:left w:val="single" w:sz="18" w:space="6" w:color="5B8DEF"/></w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="F3F6FB"/><w:spacing w:after="0"/><w:ind w:left="120" w:right="120"/></w:pPr></w:style>
 </w:styles>"""
 
 NUMBERING = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
