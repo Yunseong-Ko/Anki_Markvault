@@ -5,3 +5,6 @@ out_state/
 testcol/
 dist/
 markvault/user_files/state.json
+testbig/
+outbig/
+outbig_state/

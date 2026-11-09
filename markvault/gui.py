@@ -1,15 +1,18 @@
 """설정창과 PDF/docx 내보내기 창 (Qt)."""
 import os
+import random
+import time
 from datetime import datetime
 
 from aqt import mw
 from aqt.operations import QueryOp
-from aqt.qt import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-                    QLabel, QLineEdit, QPushButton, QSpinBox, QUrl, QVBoxLayout, QWebEngineView, QTimer,
-                    QPageLayout, QPageSize, QMarginsF, Qt)
+from aqt.qt import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
+                    QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox, QUrl, QVBoxLayout,
+                    QWebEngineView, QTimer, QPageLayout, QPageSize, QMarginsF, QWidget, Qt)
 from aqt.utils import showInfo, tooltip
 
 from .core import config as C
+from .core import content as CT
 from .core import exporter
 from .core.collector import collect
 from .core.renderer import Renderer
@@ -119,66 +122,206 @@ class SettingsDialog(QDialog):
         return cfg
 
 
+PREVIEW_CSS = """
+QFrame#mvPreview { background: palette(base); border: 1px solid palette(mid); border-radius: 8px; }
+QLabel#mvDeck { color: gray; font-size: 11px; }
+QLabel#mvQ { font-size: 14px; }
+QLabel#mvA { font-size: 14px; color: #1a7f37; }
+"""
+
+
 class ExportDialog(QDialog):
-    def __init__(self, parent, user_cfg: dict, state_dir: str):
+    """범위·모양·형식을 고르고 저장. 만드는 동안 진행 상황과 카드 미리보기를 보여 준다."""
+
+    def __init__(self, parent, user_cfg: dict, state_dir: str, runner=None, on_main=None, server_url=None):
         super().__init__(parent)
         self.setWindowTitle("PDF / docx 로 내보내기")
+        self.setMinimumWidth(520)
         self.cfg = C.merged(user_cfg)
         self.state_dir = state_dir
         self._view = None
-        form = QFormLayout()
+        self._cards = []
+        self._t0 = 0.0
+        # 테스트에서 바꿔 끼울 수 있게: 백그라운드 실행기, 메인 스레드 호출기, Anki 내장 서버 주소
+        self._runner = runner or self._query_op
+        self._on_main = on_main or (lambda fn: mw.taskman.run_on_main(fn))
+        self._server_url = server_url or (lambda: mw.serverURL())
+        self.setStyleSheet(PREVIEW_CSS)
 
+        form = QFormLayout()
         self.scope = QComboBox()
         self.scope.addItems(["전체", "특정 덱", "이번 주 새로 표시한 카드", "실패 N회 이상"])
         form.addRow("범위", self.scope)
         self.deck = QComboBox()
-        decks = sorted(d.name for d in mw.col.decks.all_names_and_ids())
+        try:
+            decks = sorted(d.name for d in mw.col.decks.all_names_and_ids())
+        except Exception:
+            decks = []
         self.deck.addItems(decks)
         form.addRow("덱", self.deck)
         self.min_lapses = QSpinBox()
         self.min_lapses.setRange(1, 50)
         self.min_lapses.setValue(3)
         form.addRow("실패 N회", self.min_lapses)
-
         self.mode = QComboBox()
         self.mode.addItems(["읽기용 — 정답 바로 보임", "확인용 — 빈칸·문제만, 정답은 마지막 장"])
         form.addRow("모양", self.mode)
-
         self.fmt = QComboBox()
         self.fmt.addItems(["PDF — 쭉 읽기용", "Word (docx) — 노트정리용, 편집 가능"])
         form.addRow("형식", self.fmt)
+        self.form_box = QWidget()
+        self.form_box.setLayout(form)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._export)
-        buttons.rejected.connect(self.reject)
-        lay = QVBoxLayout(self)
-        lay.addLayout(form)
+        # ---- 진행 패널 (처음엔 숨김) ----
+        self.progress_box = QWidget()
+        pl = QVBoxLayout(self.progress_box)
+        pl.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        self.stage = QLabel("")
+        self.elapsed = QLabel("")
+        self.elapsed.setAlignment(Qt.AlignmentFlag.AlignRight)
+        row.addWidget(self.stage)
+        row.addWidget(self.elapsed)
+        pl.addLayout(row)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        pl.addWidget(self.bar)
+        self.preview = QFrame()
+        self.preview.setObjectName("mvPreview")
+        vl = QVBoxLayout(self.preview)
+        vl.setContentsMargins(14, 10, 14, 12)
+        self.pv_head = QLabel("기다리는 동안 한 장 볼까요?")
+        self.pv_head.setObjectName("mvDeck")
+        self.pv_deck = QLabel("")
+        self.pv_deck.setObjectName("mvDeck")
+        self.pv_q = QLabel("")
+        self.pv_q.setObjectName("mvQ")
+        self.pv_a = QLabel("")
+        self.pv_a.setObjectName("mvA")
+        for w in (self.pv_deck, self.pv_q, self.pv_a):
+            w.setWordWrap(True)
+        for w in (self.pv_head, self.pv_deck, self.pv_q, self.pv_a):
+            vl.addWidget(w)
+        self.preview.setMinimumHeight(170)
+        self.preview.hide()
+        pl.addWidget(self.preview)
+        self.progress_box.hide()
+
         self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self._export)
+        self.buttons.rejected.connect(self._cancel)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.form_box)
+        lay.addWidget(self.progress_box)
         lay.addWidget(self.status)
-        lay.addWidget(buttons)
+        lay.addWidget(self.buttons)
         self.scope.currentIndexChanged.connect(self._toggle)
         self._toggle()
+
+        self._tick = QTimer(self)
+        self._tick.timeout.connect(self._update_elapsed)
+        self._pv_timer = QTimer(self)
+        self._pv_timer.timeout.connect(self._preview_step)
+        self._pv_phase = 0
+
+    # ---- 기본 실행기: Anki 의 백그라운드 작업 ----
+    def _query_op(self, op, success, failure):
+        QueryOp(parent=self, op=op, success=success).failure(failure).run_in_background()
 
     def _toggle(self):
         i = self.scope.currentIndex()
         self.deck.setEnabled(i == 1)
         self.min_lapses.setEnabled(i == 3)
 
-    def _export(self):
+    def _cancel(self):
+        self._stop_ui()
+        self.reject()
+
+    # ---- 진행 표시 ----
+    def _start_ui(self):
+        self.form_box.setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(False)
+        self.status.setText("")
+        self.progress_box.show()
+        self._t0 = time.time()
+        self._tick.start(500)
+        self._update_elapsed()
+
+    def _stop_ui(self):
+        self._tick.stop()
+        self._pv_timer.stop()
+
+    def _set_stage(self, text: str, value: int = -1, maximum: int = 0):
+        self.stage.setText(text)
+        if value < 0:
+            self.bar.setRange(0, 0)          # 끝을 모를 때: 왔다갔다 하는 막대
+        else:
+            self.bar.setRange(0, max(maximum, 1))
+            self.bar.setValue(value)
+
+    def _update_elapsed(self):
+        self.elapsed.setText(f"{int(time.time() - self._t0)}초")
+
+    def _start_preview(self):
+        if not self._cards:
+            return
+        self.preview.show()
+        self._pv_phase = 0
+        self._preview_step()
+
+    def _preview_step(self):
+        """새 카드(빈칸 가림) 4초 → 정답 공개 3초 → 새 카드 …"""
+        if not self._cards:
+            return
+        self._pv_timer.start(4000 if self._pv_phase % 2 == 0 else 3000)
+        if self._pv_phase % 2 == 0:
+            c = random.choice(self._cards)
+            q, a = CT.preview(c.content, c.ords or [c.ord])
+            self._pv_cur = (c, q, a)
+            self.pv_deck.setText(c.deck.replace("::", " › "))
+            self.pv_q.setText(q or self._title(c))
+            self.pv_a.setText("")
+        else:
+            c, q, a = self._pv_cur
+            if a and a != q:
+                self.pv_a.setText(a if c.is_cloze else f"→ {a}")
+        self._pv_phase += 1
+
+    @staticmethod
+    def _title(c):
+        return (c.content.title if c.content else "") or "(내용 없음)"
+
+    def _fail(self, msg: str):
+        self._stop_ui()
+        self.form_box.setEnabled(True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(True)
+        self.progress_box.hide()
+        self.status.setText(msg)
+
+    # ---- 내보내기 ----
+    def _export(self, path: str = ""):
         scope = ["all", "deck", "week", "lapses"][self.scope.currentIndex()]
         mode = ["read", "check"][self.mode.currentIndex()]
         is_pdf = self.fmt.currentIndex() == 0
-        stamp = datetime.now().strftime("%Y%m%d")
-        default = os.path.join(self.cfg["output_dir"], f"Anki 복습 {stamp}.{'pdf' if is_pdf else 'docx'}")
-        path, _ = QFileDialog.getSaveFileName(self, "저장", default, "PDF (*.pdf)" if is_pdf else "Word (*.docx)")
         if not path:
-            return
-        self.status.setText("만드는 중…")
+            stamp = datetime.now().strftime("%Y%m%d")
+            default = os.path.join(self.cfg["output_dir"], f"Anki 복습 {stamp}.{'pdf' if is_pdf else 'docx'}")
+            path, _ = QFileDialog.getSaveFileName(self, "저장", default, "PDF (*.pdf)" if is_pdf else "Word (*.docx)")
+            if not path:
+                return
+        self._start_ui()
+        self._set_stage("카드 모으는 중…", 0, 1)
         cfg, state_dir = self.cfg, self.state_dir
         deck, min_l = self.deck.currentText(), self.min_lapses.value()
 
-        def op(col):
-            cards = collect(col, C.effective_query(cfg), cfg.get("extra_fields"))
+        def progress(i, n):
+            self._on_main(lambda: self._set_stage(f"카드 모으는 중… {i}/{n}", i, n))
+
+        # 1단계: 카드 모으기 (빨리 끝남) → 미리보기 시작
+        def op_collect(col):
+            cards = collect(col, C.effective_query(cfg), cfg.get("extra_fields"), progress=progress)
             r = Renderer(cfg, col.media.dir(), cfg["output_dir"])
             w = Writer(cfg, r, state_dir=state_dir)
             cards = exporter.filter_cards(cards, scope, deck, min_l, w.state.get("cards"))
@@ -191,47 +334,53 @@ class ExportDialog(QDialog):
                             m = extract_memo(blk)
                             if m:
                                 memos.setdefault(cid, m)
-            if is_pdf:
-                base = mw.serverURL()
-                head = (f"<script src='{base}_anki/js/mathjax.js'></script>"
-                        f"<script src='{base}_anki/js/vendor/mathjax/tex-chtml.js'></script>")
-                html = exporter.build_html(cards, cfg, r, mode, memos, media_dir=col.media.dir(), extra_head=head)
-                return ("pdf", html, col.media.dir(), len(cards))
-            # docx: 외부 프로그램 없이 직접 만든다
-            from .core.docx_writer import build_docx
-            err = None
-            if cards:
-                try:
-                    build_docx(cards, cfg, r, path, col.media.dir(), memos,
-                               title=os.path.splitext(os.path.basename(path))[0])
-                except Exception as e:  # noqa: BLE001
-                    err = f"docx 만들기 실패: {e}"
-            return ("docx", err, None, len(cards))
+            return cards, memos, r, col.media.dir()
 
-        def done(result):
-            kind, payload, media_dir, n = result
-            if n == 0:
-                self.status.setText("범위에 맞는 카드가 없어요.")
+        def collected(result):
+            cards, memos, r, media_dir = result
+            if not cards:
+                self._fail("범위에 맞는 카드가 없어요.")
                 return
-            if kind == "docx":
-                if payload:
-                    showInfo(payload)
-                    self.status.setText("")
+            self._cards = cards
+            self._start_preview()
+            n_cards = sum(len(c.cids or [c.cid]) for c in cards)
+            self._set_stage(f"{'PDF' if is_pdf else 'Word'} 문서 만드는 중… (카드 {n_cards}장)")
+            base = self._server_url()
+            head = (f"<script src='{base}_anki/js/mathjax.js'></script>"
+                    f"<script src='{base}_anki/js/vendor/mathjax/tex-chtml.js'></script>")
+
+            # 2단계: 문서 만들기 (백그라운드)
+            def op_build(_col):
+                if is_pdf:
+                    return exporter.build_html(cards, cfg, r, mode, memos, media_dir=media_dir, extra_head=head)
+                from .core.docx_writer import build_docx
+                build_docx(cards, cfg, r, path, media_dir, memos,
+                           title=os.path.splitext(os.path.basename(path))[0])
+                return None
+
+            def built(html):
+                if is_pdf:
+                    self._print_pdf(html, path, n_cards)
                 else:
-                    tooltip(f"docx 저장: {n}장")
-                    self.accept()
-                return
-            self._print_pdf(payload, media_dir, path, n)
+                    self._done(f"Word 저장: 카드 {n_cards}장", path)
 
-        QueryOp(parent=self, op=op, success=done).run_in_background()
+            self._runner(op_build, built, lambda e: self._fail(f"문서 만들기 실패: {e}"))
 
-    def _print_pdf(self, html: str, media_dir: str, path: str, n: int):
+        self._runner(op_collect, collected, lambda e: self._fail(f"카드 모으기 실패: {e}"))
+
+    def _done(self, msg: str, path: str):
+        self._stop_ui()
+        self.done_path = path
+        tooltip(msg, period=4000)
+        self.accept()
+
+    def _print_pdf(self, html: str, path: str, n: int):
         """Anki 에 내장된 브라우저 엔진으로 '인쇄'.
         setHtml() 은 2MB 가 넘으면 조용히 빈 페이지가 되므로, 임시 HTML 파일을 만들어 load() 한다."""
         self._html_path = os.path.splitext(path)[0] + ".html"
         with open(self._html_path, "w", encoding="utf-8") as f:
             f.write(html)
-        self.status.setText(f"PDF 만드는 중… ({n}장, 카드가 많으면 1분 정도 걸려요)")
+        self._set_stage("페이지 그리는 중…", 0, 100)
         self._view = QWebEngineView()
         self._view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         self._view.resize(800, 1100)
@@ -240,29 +389,29 @@ class ExportDialog(QDialog):
                              QMarginsF(16, 18, 16, 18), QPageLayout.Unit.Millimeter)
 
         def finished(p, ok):
-            self._view.deleteLater()
-            self._view = None
+            if self._view is not None:
+                self._view.deleteLater()
+                self._view = None
             size = os.path.getsize(p) if ok and os.path.exists(p) else 0
             if ok and size > 2000:
                 try:
                     os.remove(self._html_path)
                 except OSError:
                     pass
-                tooltip(f"PDF 저장: {n}장")
-                self.accept()
+                self._done(f"PDF 저장: 카드 {n}장", p)
             else:
-                self.status.setText("PDF 가 비어 있어요. 같은 이름의 .html 파일을 브라우저로 열어 인쇄(⌘P)해 주세요.")
+                self._fail("PDF 가 비어 있어요. 같은 이름의 .html 파일을 브라우저로 열어 인쇄(⌘P)해 주세요.")
 
         def loaded(ok):
             if not ok:
-                self._view.deleteLater()
-                self._view = None
-                self.status.setText("페이지를 못 열었어요. 같은 이름의 .html 파일을 브라우저로 열어 인쇄(⌘P)해 주세요.")
+                self._fail("페이지를 못 열었어요. 같은 이름의 .html 파일을 브라우저로 열어 인쇄(⌘P)해 주세요.")
                 return
+            self._set_stage(f"PDF 로 인쇄하는 중… (카드 {n}장, 1분 정도 걸릴 수 있어요)")
             # 이미지·수식이 다 그려질 시간을 준다 (카드 수에 비례, 최대 10초)
-            delay = min(10000, 1500 + n * 20)
-            QTimer.singleShot(delay, lambda: self._view.page().printToPdf(path, layout))
+            delay = min(10000, 1500 + n * 5)
+            QTimer.singleShot(delay, lambda: self._view and self._view.page().printToPdf(path, layout))
 
+        self._view.loadProgress.connect(lambda v: self._set_stage("페이지 그리는 중…", v, 100))
         self._view.page().pdfPrintingFinished.connect(finished)
         self._view.loadFinished.connect(loaded)
         self._view.load(QUrl.fromLocalFile(self._html_path))

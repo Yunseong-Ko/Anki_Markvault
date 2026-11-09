@@ -115,3 +115,22 @@ def build(note, notetype: dict, ord_: int, extra_names: Optional[List[str]] = No
             continue
         c.extras.append((n, v))
     return c
+
+
+def preview(ct: "Content", ords, limit: int = 260) -> Tuple[str, str]:
+    """로딩 화면용 (문제, 정답) 평문. cloze 는 빈칸을 ［…］ / 【답】 으로."""
+    def flat(h):
+        t = re.sub(r"[ \t]+", " ", plain(h))
+        t = re.sub(r"\s*\n\s*", "\n", t).strip()
+        return (t[:limit] + "…") if len(t) > limit else t
+    if ct is None:
+        return "", ""
+    if ct.kind == "cloze":
+        q = cloze_to_html(ct.question_html, ords, hidden=True)
+        a = cloze_to_html(ct.question_html, ords)
+        q = re.sub(r'<span class="cloze">\[(.*?)\]</span>', r"［\1］", q)
+        a = re.sub(r'<span class="cloze">(.*?)</span>', r"【\1】", a)
+        return flat(q), flat(a)
+    if ct.kind == "basic":
+        return flat(ct.question_html), flat(ct.answer_html)
+    return flat(ct.question_html), ""

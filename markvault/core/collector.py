@@ -62,9 +62,13 @@ def signature(col, query: str) -> str:
     return h.hexdigest()
 
 
-def collect(col, query: str, extra_fields: Optional[List[str]] = None) -> List[CardInfo]:
+def collect(col, query: str, extra_fields: Optional[List[str]] = None, progress=None) -> List[CardInfo]:
+    """progress(i, n) 를 주면 50장마다 불러 준다 (백그라운드 스레드에서)."""
     out = []
-    for cid in col.find_cards(query):
+    ids = col.find_cards(query)
+    for i, cid in enumerate(ids):
+        if progress and i % 50 == 0:
+            progress(i, len(ids))
         card = col.get_card(cid)
         note = card.note()
         nt = card.note_type()

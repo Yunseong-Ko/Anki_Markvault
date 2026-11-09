@@ -55,7 +55,11 @@ def run_export(force: bool = False, quiet: bool = False):
         _running = False
         showInfo(f"MarkVault 내보내기 실패:\n{exc}")
 
-    QueryOp(parent=mw, op=op, success=on_done).failure(on_fail).run_in_background()
+    q = QueryOp(parent=mw, op=op, success=on_done).failure(on_fail)
+    if not quiet:
+        # 메뉴에서 직접 누른 경우만 로딩창 (동기화 뒤 자동 실행은 조용히)
+        q = q.with_progress("MarkVault: 플래그·마크 카드 정리하는 중…")
+    q.run_in_background()
 
 
 def schedule(delay_sec: float):
@@ -111,7 +115,7 @@ def open_export():
 def setup_menu():
     menu = QMenu("MarkVault", mw)
     a = QAction("지금 내보내기", mw)
-    a.triggered.connect(lambda: run_export(force=True))
+    a.triggered.connect(lambda: run_export(force=True, quiet=False))
     menu.addAction(a)
     a = QAction("출력 폴더 열기", mw)
     a.triggered.connect(open_folder)
